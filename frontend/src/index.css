@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --color-void: #05060a;
+  --color-panel: #0b0e16;
+  --color-panel2: #10141f;
+  --color-edge: #1d2333;
+  --color-fog: #8b93a7;
+  --color-mist: #b8bfd0;
+  --color-neon: #22d3ee;
+  --color-neon-soft: rgba(34, 211, 238, 0.14);
+  --color-violet: #a78bfa;
+  --color-danger: #f87171;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-void);
+  color: var(--color-mist);
+  font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+@keyframes s2s-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.s2s-pulse {
+  animation: s2s-pulse 1.6s ease-in-out infinite;
+}

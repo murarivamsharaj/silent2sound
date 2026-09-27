@@ -1,0 +1,32 @@
+# === Silent2Sound Runtime & Media Files ===
+backend/uploads/
+backend/uploads/*
+!backend/uploads/.gitkeep
+uploads/
+uploads/*
+
+# FFmpeg static distribution binaries (crucial - these exceed 100MB)
+backend/tools/
+tools/
+*.exe
+*.zip
+*.tar.xz
+
+# Generated media artifacts
+*.mp4
+*.wav
+*.mp3
+*.jpg
+*.jpeg
+
+# === React Frontend ===
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+node_modules/
+dist/
+
+# === Secrets & Environment ===
+.env
+.env.*
+application-local.properties
