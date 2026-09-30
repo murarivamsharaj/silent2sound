@@ -79,12 +79,21 @@ public class FfmpegService {
      */
     public void generateSyntheticToneAudio(Path outputPath, double durationSeconds)
             throws IOException, InterruptedException {
+        generateToneAudio(outputPath, durationSeconds, "440");
+    }
+
+    /**
+     * Generates a sine-wave AAC track at an arbitrary frequency; distinct
+     * frequencies let tests tell the ambient and speech tracks apart.
+     */
+    public void generateToneAudio(Path outputPath, double durationSeconds, String frequency)
+            throws IOException, InterruptedException {
         Files.createDirectories(outputPath.toAbsolutePath().getParent());
 
         List<String> command = List.of(
                 ffmpegCommand, "-y",
                 "-f", "lavfi",
-                "-i", "sine=frequency=440:duration=" + durationSeconds,
+                "-i", "sine=frequency=" + frequency + ":duration=" + durationSeconds,
                 "-c:a", "aac",
                 outputPath.toAbsolutePath().toString());
 
@@ -108,6 +117,33 @@ public class FfmpegService {
                 outputPath.toAbsolutePath().toString());
 
         run(command, "muxing");
+    }
+
+    /**
+     * Two-track mix: ambient/foley ducked to 40% under the speech track so
+     * dialogue stays intelligible, video stream copied untouched.
+     */
+    public void mixMultiTrackAudio(Path videoPath, Path ambientAudioPath, Path speechAudioPath,
+                                   Path outputPath)
+            throws IOException, InterruptedException {
+        Files.createDirectories(outputPath.toAbsolutePath().getParent());
+
+        List<String> command = List.of(
+                ffmpegCommand, "-y",
+                "-i", videoPath.toAbsolutePath().toString(),
+                "-i", ambientAudioPath.toAbsolutePath().toString(),
+                "-i", speechAudioPath.toAbsolutePath().toString(),
+                "-filter_complex",
+                "[1:a]volume=0.4[amb];[2:a]volume=1.0[spk];"
+                        + "[amb][spk]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+                "-map", "0:v",
+                "-map", "[aout]",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                outputPath.toAbsolutePath().toString());
+
+        run(command, "multi-track mixing");
     }
 
     /**

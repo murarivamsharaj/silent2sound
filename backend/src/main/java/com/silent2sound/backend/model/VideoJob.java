@@ -48,6 +48,13 @@ public class VideoJob {
 
     private String errorMessage;
 
+    @Builder.Default
+    @Column(nullable = false)
+    private Boolean hasPeople = false;
+
+    @Column(columnDefinition = "TEXT")
+    private String dialogueTranscript;
+
     private Double durationSeconds;
 
     @Column(nullable = false, updatable = false)

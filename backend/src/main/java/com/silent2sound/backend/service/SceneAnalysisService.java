@@ -1,26 +1,29 @@
 package com.silent2sound.backend.service;
 
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.json.JsonMapper;
-import tools.jackson.databind.node.ArrayNode;
-import tools.jackson.databind.node.ObjectNode;
+import com.silent2sound.backend.dto.SceneAnalysisResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 
 /**
- * Describes a scene by sending extracted frames to a vision model, falling
- * back to a canned descriptive prompt in mock mode or when no API key is set.
+ * Describes a scene and decides whether people (potential speakers) appear,
+ * by sending extracted frames to a vision model. Falls back to a canned
+ * descriptive prompt plus keyword heuristics in mock mode or when no API key
+ * is configured.
  */
 @Service
 @Slf4j
@@ -28,10 +31,18 @@ public class SceneAnalysisService {
 
     private static final String FALLBACK_PROMPT =
             "City park, windy trees, distant traffic, birds chirping";
+    private static final String MOCK_DIALOGUE_LINE = "Hello, can you hear me?";
     private static final String VISION_PROMPT =
             "Describe the environmental sounds and action sounds for this scene in 20 words "
-                    + "for an audio generator.";
+                    + "for an audio generator. Then on a new line answer strictly with "
+                    + "'PEOPLE: yes' or 'PEOPLE: no' depending on whether any people who might "
+                    + "be speaking are visible.";
     private static final int MAX_FRAMES_SENT = 3;
+
+    /** Keywords in the user prompt override that imply human speakers. */
+    private static final List<String> PEOPLE_KEYWORDS = List.of(
+            "talk", "talking", "talks", "people", "person", "man", "woman", "speech",
+            "speak", "speaking", "voice", "dialogue", "conversation", "interview");
 
     private final WebClient webClient;
 
@@ -47,32 +58,44 @@ public class SceneAnalysisService {
                 .build();
     }
 
-    public String analyzeFramesAndGeneratePrompt(List<Path> framePaths, String userPromptOverride) {
-        String visionPrompt;
+    public SceneAnalysisResult analyzeFrames(List<Path> framePaths, String userPromptOverride) {
         if (isMockProvider() || isBlank(visionApiKey) || framePaths == null || framePaths.isEmpty()) {
-            visionPrompt = FALLBACK_PROMPT;
-            log.info("Scene analysis using fallback prompt (provider={}, keyPresent={}, frames={})",
-                    provider, !isBlank(visionApiKey), framePaths == null ? 0 : framePaths.size());
-        } else {
-            try {
-                visionPrompt = callVisionApi(framePaths);
-            } catch (Exception e) {
-                log.warn("Vision API call failed, falling back to default prompt: {}", e.getMessage());
-                visionPrompt = FALLBACK_PROMPT;
-            }
+            return mockAnalysis(userPromptOverride);
         }
 
-        if (userPromptOverride != null && !userPromptOverride.isBlank()) {
-            return visionPrompt + ". " + userPromptOverride.trim();
+        try {
+            return visionAnalysis(framePaths, userPromptOverride);
+        } catch (Exception e) {
+            log.warn("Vision API call failed, falling back to default prompt: {}", e.getMessage());
+            SceneAnalysisResult fallback = mockAnalysis(userPromptOverride);
+            return SceneAnalysisResult.builder()
+                    .scenePrompt(FALLBACK_PROMPT + appendOverride(userPromptOverride))
+                    .hasPeople(fallback.isHasPeople())
+                    .suggestedDialogue(fallback.getSuggestedDialogue())
+                    .build();
         }
-        return visionPrompt;
     }
 
-    private boolean isMockProvider() {
-        return "mock".equalsIgnoreCase(provider);
+    /**
+     * Mock/heuristic path: keyword detection on the user's prompt override
+     * decides whether speakers are implied; a canned dialogue line is offered.
+     */
+    private SceneAnalysisResult mockAnalysis(String userPromptOverride) {
+        log.info("Scene analysis using fallback prompt (provider={}, keyPresent={})",
+                provider, !isBlank(visionApiKey));
+
+        boolean hasPeople = mentionsPeople(userPromptOverride);
+        String scenePrompt = FALLBACK_PROMPT + appendOverride(userPromptOverride);
+
+        return SceneAnalysisResult.builder()
+                .scenePrompt(scenePrompt)
+                .hasPeople(hasPeople)
+                .suggestedDialogue(hasPeople ? MOCK_DIALOGUE_LINE : null)
+                .build();
     }
 
-    private String callVisionApi(List<Path> framePaths) throws IOException, InterruptedException {
+    private SceneAnalysisResult visionAnalysis(List<Path> framePaths, String userPromptOverride)
+            throws IOException, InterruptedException {
         List<Path> selected = framePaths.stream()
                 .sorted()
                 .limit(MAX_FRAMES_SENT)
@@ -87,7 +110,7 @@ public class SceneAnalysisService {
                 .add(mapper.createObjectNode()
                         .put("role", "user")
                         .set("content", content)));
-        payload.put("max_tokens", 80);
+        payload.put("max_tokens", 120);
 
         JsonNode response = webClient.post()
                 .uri("/chat/completions")
@@ -103,7 +126,43 @@ public class SceneAnalysisService {
         if (description == null || description.isBlank()) {
             throw new IOException("Vision API returned an empty description.");
         }
-        return description.trim();
+
+        // Split the description from the trailing "PEOPLE: yes/no" verdict.
+        String flattened = description.trim();
+        boolean hasPeople = flattened.toLowerCase(Locale.ROOT).contains("people: yes");
+        String scenePrompt = flattened.replaceAll("(?i)people:\\s*(yes|no)", "").trim();
+
+        // The model may invent dialogue; otherwise synthesize one when people
+        // are present, and always honour an explicit user override.
+        boolean overrideImpliesPeople = mentionsPeople(userPromptOverride);
+        if (overrideImpliesPeople) {
+            hasPeople = true;
+        }
+        String dialogue = hasPeople ? MOCK_DIALOGUE_LINE : null;
+
+        return SceneAnalysisResult.builder()
+                .scenePrompt(scenePrompt + appendOverride(userPromptOverride))
+                .hasPeople(hasPeople)
+                .suggestedDialogue(dialogue)
+                .build();
+    }
+
+    private static boolean mentionsPeople(String userPromptOverride) {
+        if (userPromptOverride == null || userPromptOverride.isBlank()) {
+            return false;
+        }
+        String lower = userPromptOverride.toLowerCase(Locale.ROOT);
+        return PEOPLE_KEYWORDS.stream().anyMatch(lower::contains);
+    }
+
+    private static String appendOverride(String userPromptOverride) {
+        return (userPromptOverride != null && !userPromptOverride.isBlank())
+                ? ". " + userPromptOverride.trim()
+                : "";
+    }
+
+    private boolean isMockProvider() {
+        return "mock".equalsIgnoreCase(provider);
     }
 
     private static ArrayNode buildContent(String textPrompt, List<Path> frames) throws IOException {

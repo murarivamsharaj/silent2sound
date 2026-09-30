@@ -1,5 +1,6 @@
 package com.silent2sound.backend.service;
 
+import com.silent2sound.backend.dto.SceneAnalysisResult;
 import com.silent2sound.backend.model.JobStatus;
 import com.silent2sound.backend.model.VideoJob;
 import com.silent2sound.backend.repository.VideoJobRepository;
@@ -33,6 +34,8 @@ public class VideoProcessingPipelineService {
     private final FfmpegService ffmpegService;
     private final SceneAnalysisService sceneAnalysisService;
     private final AudioGenerationService audioGenerationService;
+    private final SpeechSynthesisService speechSynthesisService;
+    private final LipSyncService lipSyncService;
 
     @Value("${app.storage.upload-dir}")
     private String uploadDir;
@@ -51,31 +54,53 @@ public class VideoProcessingPipelineService {
             log.info("Job {}: extracted {} sample frames", jobId, frames.size());
 
             job = requireJob(jobId);
-            String soundPrompt = sceneAnalysisService.analyzeFramesAndGeneratePrompt(
+            SceneAnalysisResult analysis = sceneAnalysisService.analyzeFrames(
                     frames, job.getPromptOverride());
-            job.setSceneDescription(soundPrompt);
+            job.setSceneDescription(analysis.getScenePrompt());
+            job.setHasPeople(analysis.isHasPeople());
+            job.setDialogueTranscript(analysis.getSuggestedDialogue());
             job.setUpdatedAt(LocalDateTime.now());
             videoJobRepository.save(job);
-            log.info("Job {}: scene prompt: {}", jobId, soundPrompt);
+            log.info("Job {}: scene prompt: {} (hasPeople={})", jobId,
+                    analysis.getScenePrompt(), analysis.isHasPeople());
 
-            // 2. GENERATING_AUDIO — generate the audio track from the scene
-            //    prompt (mock tone locally, ElevenLabs when configured).
+            // 2. GENERATING_AUDIO — generate the ambient/foley track from the
+            //    scene prompt (mock tone locally, ElevenLabs when configured),
+            //    plus a speech track when people are detected.
             updateStatus(jobId, JobStatus.GENERATING_AUDIO);
             double durationSeconds = ffmpegService.probeDuration(videoPath)
                     .map(d -> d.toMillis() / 1000.0)
                     .orElse(FALLBACK_DURATION_SECONDS);
-            Path audioPath = Paths.get(uploadDir, "audio_" + jobId + ".m4a");
-            audioGenerationService.generateAudioTrack(
-                    soundPrompt, Math.max(1.0, durationSeconds), audioPath);
+            double safeDuration = Math.max(1.0, durationSeconds);
 
-            // 3. MERGING — mux original video with the synthetic audio.
+            Path ambientPath = Paths.get(uploadDir, "audio_" + jobId + ".m4a");
+            audioGenerationService.generateAudioTrack(
+                    analysis.getScenePrompt(), safeDuration, ambientPath);
+
+            Path speechPath = null;
+            if (analysis.isHasPeople() && analysis.getSuggestedDialogue() != null
+                    && !analysis.getSuggestedDialogue().isBlank()) {
+                speechPath = Paths.get(uploadDir, "speech_" + jobId + ".m4a");
+                speechSynthesisService.generateSpeechTrack(
+                        analysis.getSuggestedDialogue(), safeDuration, speechPath);
+            }
+
+            // 3. MERGING — optional lip-sync pass, then two-track mix with
+            //    ambient ducking, or a plain single-track mux when no speech.
             updateStatus(jobId, JobStatus.MERGING);
             Path outputPath = Paths.get(uploadDir, "output_" + jobId + ".mp4");
-            ffmpegService.muxVideoAndAudio(videoPath, audioPath, outputPath);
+            if (speechPath != null) {
+                Path syncedVideoPath = Paths.get(uploadDir, "synced_" + jobId + ".mp4");
+                lipSyncService.syncLipsIfEnabled(videoPath, speechPath, syncedVideoPath);
+                ffmpegService.mixMultiTrackAudio(syncedVideoPath, ambientPath, speechPath, outputPath);
+            } else {
+                ffmpegService.muxVideoAndAudio(videoPath, ambientPath, outputPath);
+            }
 
             // 4. COMPLETED — publish the muxed file path.
             job = requireJob(jobId);
             job.setStatus(JobStatus.COMPLETED);
+            job.setDurationSeconds(durationSeconds);
             job.setOutputPath(outputPath.toString());
             job.setUpdatedAt(LocalDateTime.now());
             videoJobRepository.save(job);

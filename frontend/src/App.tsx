@@ -11,13 +11,20 @@ import {
   Check,
   Download,
   Play,
+  MessageSquareText,
+  VolumeX,
 } from 'lucide-react'
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024 // 100 MB
 const ALLOWED_EXTENSIONS = ['mp4', 'mov']
-const UPLOAD_URL = 'http://localhost:8080/api/v1/videos/upload'
-const STATUS_URL = 'http://localhost:8080/api/v1/videos/status/'
-const BACKEND_ORIGIN = 'http://localhost:8080'
+
+// Match host dynamically (whether user opens localhost or 127.0.0.1)
+const BACKEND_HOST = typeof window !== 'undefined' && window.location.hostname === '127.0.0.1' 
+  ? '127.0.0.1' 
+  : 'localhost'
+const BACKEND_ORIGIN = `http://${BACKEND_HOST}:8080`
+const UPLOAD_URL = `${BACKEND_ORIGIN}/api/v1/videos/upload`
+const STATUS_URL = `${BACKEND_ORIGIN}/api/v1/videos/status/`
 const POLL_INTERVAL_MS = 1500
 
 interface UploadResponse {
@@ -31,11 +38,13 @@ interface JobStatusResponse {
   status: string
   sceneDescription: string | null
   errorMessage: string | null
+  hasPeople?: boolean
+  dialogueTranscript?: string | null
   progressPercentage: number
   downloadUrl: string | null
 }
 
-const PIPELINE_STEPS = [
+const PIPELINE_STEPS = (hasPeople: boolean) => [
   {
     label: 'Uploaded',
     backendStatuses: ['PENDING', 'ANALYZING', 'GENERATING_AUDIO', 'MERGING', 'COMPLETED'],
@@ -45,7 +54,7 @@ const PIPELINE_STEPS = [
     backendStatuses: ['ANALYZING', 'GENERATING_AUDIO', 'MERGING', 'COMPLETED'],
   },
   {
-    label: 'Foley & Voice Synthesis',
+    label: hasPeople ? 'Foley, Voice Synthesis & Lip-Sync' : 'Ambient Foley Generation',
     backendStatuses: ['GENERATING_AUDIO', 'MERGING', 'COMPLETED'],
   },
   {
@@ -79,6 +88,9 @@ function App() {
   const [jobStatus, setJobStatus] = useState<string | null>(null)
   const [progress, setProgress] = useState(0)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
+  const [sceneDescription, setSceneDescription] = useState<string | null>(null)
+  const [hasPeople, setHasPeople] = useState<boolean>(false)
+  const [dialogueTranscript, setDialogueTranscript] = useState<string | null>(null)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const [isDragOver, setIsDragOver] = useState(false)
@@ -86,14 +98,14 @@ function App() {
   const inFlightRef = useRef(false)
   const errorStreakRef = useRef(0)
 
-  // Revoke the previous object URL whenever it changes or unmounts.
+  // Revoke previous object URL on change/unmount
   useEffect(() => {
     return () => {
       if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl)
     }
   }, [videoPreviewUrl])
 
-  // Clear the status poller on unmount.
+  // Clear poller on unmount
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
@@ -123,6 +135,9 @@ function App() {
         const data = res.data
         setJobStatus(data.status)
         setProgress((prev) => Math.max(prev, data.progressPercentage))
+        if (data.sceneDescription) setSceneDescription(data.sceneDescription)
+        setHasPeople(data.hasPeople ?? false)
+        setDialogueTranscript(data.dialogueTranscript ?? null)
 
         if (data.status === 'COMPLETED') {
           setDownloadUrl(data.downloadUrl)
@@ -134,7 +149,6 @@ function App() {
           stopPolling()
         }
       } catch {
-        // Tolerate transient hiccups; give up after several consecutive failures.
         errorStreakRef.current += 1
         if (errorStreakRef.current >= 4) {
           stopPolling()
@@ -173,6 +187,9 @@ function App() {
       setJobStatus(null)
       setProgress(0)
       setDownloadUrl(null)
+      setSceneDescription(null)
+      setHasPeople(false)
+      setDialogueTranscript(null)
       setPhase('idle')
       if (videoPreviewUrl) URL.revokeObjectURL(videoPreviewUrl)
       setVideoPreviewUrl(URL.createObjectURL(candidate))
@@ -190,6 +207,9 @@ function App() {
     setJobStatus(null)
     setProgress(0)
     setDownloadUrl(null)
+    setSceneDescription(null)
+    setHasPeople(false)
+    setDialogueTranscript(null)
     setPhase('idle')
     setError(null)
   }
@@ -227,8 +247,9 @@ function App() {
     if (prompt.trim()) formData.append('prompt', prompt.trim())
 
     try {
+      // NOTE: Do not set Content-Type header manually; Axios will automatically
+      // set multipart/form-data with the correct boundary string.
       const res = await axios.post<UploadResponse>(UPLOAD_URL, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 120_000,
       })
 
@@ -253,12 +274,12 @@ function App() {
     }
   }
 
-  // Derive the active pipeline step from the live backend status.
+  const pipelineSteps = useMemo(() => PIPELINE_STEPS(hasPeople), [hasPeople])
   const activeStep = useMemo(() => {
     if (phase !== 'processing' && phase !== 'completed' && phase !== 'failed') return -1
     if (!jobStatus) return -1
-    return PIPELINE_STEPS.findIndex((s) => s.backendStatuses.includes(jobStatus))
-  }, [phase, jobStatus])
+    return pipelineSteps.findIndex((s) => s.backendStatuses.includes(jobStatus))
+  }, [phase, jobStatus, pipelineSteps])
 
   const resetAll = () => {
     clearFile()
@@ -463,9 +484,37 @@ function App() {
             </div>
             <p className="mt-2 text-right text-xs text-fog">{progress}%</p>
 
+            {/* Scene analysis outcome */}
+            {(sceneDescription || hasPeople || phase === 'completed') && (
+              <div className="mt-6 rounded-xl border border-edge bg-panel2 p-4">
+                {sceneDescription && (
+                  <p className="text-xs leading-relaxed text-fog">
+                    <span className="font-semibold text-mist">Scene: </span>
+                    {sceneDescription}
+                  </p>
+                )}
+                {hasPeople && dialogueTranscript ? (
+                  <div className="mt-3 rounded-2xl rounded-bl-sm border border-violet/40 bg-violet/10 px-4 py-3">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-violet uppercase">
+                      <MessageSquareText className="h-3.5 w-3.5" aria-hidden />
+                      Generated Speech Track
+                    </p>
+                    <p className="mt-1.5 text-sm text-mist italic">
+                      &ldquo;{dialogueTranscript}&rdquo;
+                    </p>
+                  </div>
+                ) : (
+                  <span className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-edge bg-panel px-3 py-1 text-xs font-medium text-fog">
+                    <VolumeX className="h-3 w-3" aria-hidden />
+                    Ambient &amp; Foley Only (No Speech)
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Step indicators */}
             <ol className="mt-6 space-y-4">
-              {PIPELINE_STEPS.map((step, idx) => {
+              {pipelineSteps.map((step, idx) => {
                 const done = idx < activeStep || progress >= 100
                 const current = idx === activeStep && progress < 100
                 return (
@@ -498,7 +547,7 @@ function App() {
               })}
             </ol>
 
-            {/* Download / preview section once synthesis is done */}
+            {/* Download / preview section */}
             {phase === 'completed' && downloadUrl && (
               <div className="mt-6 rounded-xl border border-neon/40 bg-neon-soft p-4">
                 <h3 className="flex items-center gap-2 text-sm font-semibold text-white">

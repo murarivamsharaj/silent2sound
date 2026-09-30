@@ -15,6 +15,8 @@ public class VideoJobStatusResponse {
     private JobStatus status;
     private String sceneDescription;
     private String errorMessage;
+    private Boolean hasPeople;
+    private String dialogueTranscript;
     private int progressPercentage;
     private String downloadUrl;
 
@@ -33,6 +35,8 @@ public class VideoJobStatusResponse {
                 .status(job.getStatus())
                 .sceneDescription(job.getSceneDescription())
                 .errorMessage(job.getErrorMessage())
+                .hasPeople(job.getHasPeople())
+                .dialogueTranscript(job.getDialogueTranscript())
                 .progressPercentage(progress)
                 .downloadUrl(job.getStatus() == JobStatus.COMPLETED
                         ? "/api/v1/videos/download/" + job.getId()
